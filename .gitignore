@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+
+KaliHackerTerminal.desktop
+Plutonium.py
+UbuntuHackerTerminal.desktop
+hacker_terminal_base.py
+kali_hacker_terminal.py
+messingAround.py
+netNosey.py
+nosey_plugins/
+tests/
+ubuntu_hacker_terminal.py
+weather.py
+webNosey.py
