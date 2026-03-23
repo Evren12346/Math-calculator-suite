@@ -4,7 +4,7 @@ import math
 from fractions import Fraction
 from itertools import product
 from collections import Counter
-from sympy import symbols, solve, sympify, diff, integrate, limit, simplify, expand, factor, Matrix, oo
+from sympy import symbols, solve, sympify, diff, integrate, limit, simplify, expand, factor, Matrix, oo, N as sympy_N
 from statistics import mean, median, mode, stdev, variance
 
 def evaluate_expression(expr_string, var_values=None):
@@ -1350,6 +1350,349 @@ def polynomial_operations():
         print("\n\nExiting polynomial operations...\n")
 
 
+def number_sequences():
+    """Run the number sequences mode."""
+    print("=" * 70)
+    print("Number Sequences")
+    print("=" * 70 + "\n")
+
+    try:
+        while True:
+            print("Options:")
+            print("  1) Fibonacci sequence")
+            print("  2) Arithmetic sequence")
+            print("  3) Geometric sequence")
+            print()
+
+            choice = input("Select option (1-3, or 'quit' to exit): ").strip()
+
+            if choice.lower() == 'quit':
+                print("\nExiting number sequences...\n")
+                break
+
+            if choice == '1':
+                try:
+                    n = int(input("How many Fibonacci terms? ").strip())
+                    if n < 1:
+                        print("Error: Must be at least 1 term\n")
+                        continue
+                    a, b = 0, 1
+                    seq = []
+                    for _ in range(n):
+                        seq.append(a)
+                        a, b = b, a + b
+                    print(f"\n\u2713 First {n} Fibonacci numbers:")
+                    print("  " + ", ".join(map(str, seq)) + "\n")
+                except ValueError:
+                    print("Error: Please enter a valid integer\n")
+
+            elif choice == '2':
+                try:
+                    first = float(input("First term (a): ").strip())
+                    diff_val = float(input("Common difference (d): ").strip())
+                    n = int(input("Number of terms: ").strip())
+                    if n < 1:
+                        print("Error: Must be at least 1 term\n")
+                        continue
+                    seq = [first + i * diff_val for i in range(n)]
+                    total = sum(seq)
+                    print(f"\n\u2713 Arithmetic sequence (a={first}, d={diff_val}, n={n}):")
+                    print("  " + ", ".join(str(int(x) if x == int(x) else x) for x in seq))
+                    print(f"  Sum = {total}\n")
+                except ValueError:
+                    print("Error: Please enter valid numbers\n")
+
+            elif choice == '3':
+                try:
+                    first = float(input("First term (a): ").strip())
+                    ratio = float(input("Common ratio (r): ").strip())
+                    n = int(input("Number of terms: ").strip())
+                    if n < 1:
+                        print("Error: Must be at least 1 term\n")
+                        continue
+                    seq = [first * (ratio ** i) for i in range(n)]
+                    total = sum(seq)
+                    print(f"\n\u2713 Geometric sequence (a={first}, r={ratio}, n={n}):")
+                    print("  " + ", ".join(str(int(x) if x == int(x) else round(x, 6)) for x in seq))
+                    print(f"  Sum = {total}\n")
+                except ValueError:
+                    print("Error: Please enter valid numbers\n")
+
+            else:
+                print("Invalid choice. Please enter 1-3 or 'quit'.\n")
+
+    except KeyboardInterrupt:
+        print("\n\nExiting number sequences...\n")
+
+
+def definite_integral_calculator():
+    """Run the definite integral calculator mode."""
+    print("=" * 70)
+    print("Definite Integral Calculator")
+    print("=" * 70)
+    print("Compute the definite integral of f(x) from a to b\n")
+
+    try:
+        while True:
+            expression = input("Enter expression (or 'quit' to exit): ").strip()
+
+            if expression.lower() == 'quit':
+                print("\nExiting definite integral calculator...\n")
+                break
+
+            variable = input("Enter variable (x, y, z): ").strip()
+
+            if not expression or variable not in ['x', 'y', 'z']:
+                print("Error: Invalid input\n")
+                continue
+
+            try:
+                a_str = input("Lower bound (or '-inf'): ").strip()
+                b_str = input("Upper bound (or 'inf'): ").strip()
+
+                var = symbols(variable)
+                expr = sympify(expression)
+
+                a_val = -oo if a_str.lower() in ('-inf', '-oo') else sympify(a_str)
+                b_val = oo if b_str.lower() in ('inf', 'oo') else sympify(b_str)
+
+                result = integrate(expr, (var, a_val, b_val))
+                numeric = sympy_N(result)
+
+                print("\n" + "=" * 70)
+                print(f"Expression: {expr}")
+                print(f"Bounds:     [{a_str}, {b_str}]")
+                print(f"\u2713 Exact:   {result}")
+                print(f"\u2713 Numeric: {numeric}")
+                print("=" * 70 + "\n")
+
+            except Exception as e:
+                print(f"Error: Could not compute definite integral: {e}\n")
+
+    except KeyboardInterrupt:
+        print("\n\nExiting definite integral calculator...\n")
+
+
+def complex_number_calculator():
+    """Run the complex number calculator mode."""
+    print("=" * 70)
+    print("Complex Number Calculator")
+    print("=" * 70)
+    print("Enter complex numbers in the form: a+bj  (e.g. 3+4j, 2-1j, 5j, 7)\n")
+
+    def parse_complex(s):
+        try:
+            return complex(s.replace(' ', ''))
+        except ValueError:
+            raise ValueError(f"Cannot parse '{s}' as a complex number")
+
+    try:
+        while True:
+            print("Options:")
+            print("  1) Add")
+            print("  2) Subtract")
+            print("  3) Multiply")
+            print("  4) Divide")
+            print("  5) Modulus (|z|) and Argument")
+            print("  6) Conjugate")
+            print("  7) Power")
+            print()
+
+            choice = input("Select option (1-7, or 'quit' to exit): ").strip()
+
+            if choice.lower() == 'quit':
+                print("\nExiting complex number calculator...\n")
+                break
+
+            if choice in ('1', '2', '3', '4'):
+                try:
+                    z1 = parse_complex(input("Enter first complex number: ").strip())
+                    z2 = parse_complex(input("Enter second complex number: ").strip())
+                    if choice == '1':
+                        result = z1 + z2
+                        op = '+'
+                    elif choice == '2':
+                        result = z1 - z2
+                        op = '-'
+                    elif choice == '3':
+                        result = z1 * z2
+                        op = '\u00d7'
+                    else:
+                        if z2 == 0:
+                            print("Error: Division by zero\n")
+                            continue
+                        result = z1 / z2
+                        op = '\u00f7'
+                    print(f"\n\u2713 ({z1}) {op} ({z2}) = {result}\n")
+                except ValueError as e:
+                    print(f"Error: {e}\n")
+
+            elif choice == '5':
+                try:
+                    z = parse_complex(input("Enter complex number: ").strip())
+                    mod = abs(z)
+                    arg = math.degrees(math.atan2(z.imag, z.real))
+                    print(f"\n\u2713 |{z}| = {mod:.6f}")
+                    print(f"\u2713 arg({z}) = {arg:.6f}\u00b0 ({math.radians(arg):.6f} rad)\n")
+                except ValueError as e:
+                    print(f"Error: {e}\n")
+
+            elif choice == '6':
+                try:
+                    z = parse_complex(input("Enter complex number: ").strip())
+                    conj = z.conjugate()
+                    print(f"\n\u2713 conj({z}) = {conj}\n")
+                except ValueError as e:
+                    print(f"Error: {e}\n")
+
+            elif choice == '7':
+                try:
+                    z = parse_complex(input("Enter complex number: ").strip())
+                    n = float(input("Enter exponent: ").strip())
+                    result = z ** n
+                    print(f"\n\u2713 ({z})^{n} = {result}\n")
+                except ValueError as e:
+                    print(f"Error: {e}\n")
+
+            else:
+                print("Invalid choice. Please enter 1-7 or 'quit'.\n")
+
+    except KeyboardInterrupt:
+        print("\n\nExiting complex number calculator...\n")
+
+
+def geometry_calculator():
+    """Run the geometry calculator mode (area, perimeter, volume)."""
+    print("=" * 70)
+    print("Geometry Calculator")
+    print("=" * 70 + "\n")
+
+    PI = math.pi
+
+    try:
+        while True:
+            print("Shapes:")
+            print("  1) Circle")
+            print("  2) Rectangle / Square")
+            print("  3) Triangle (sides)")
+            print("  4) Sphere")
+            print("  5) Cylinder")
+            print("  6) Rectangular Prism (box)")
+            print("  7) Cone")
+            print()
+
+            choice = input("Select shape (1-7, or 'quit' to exit): ").strip()
+
+            if choice.lower() == 'quit':
+                print("\nExiting geometry calculator...\n")
+                break
+
+            if choice == '1':
+                try:
+                    r = float(input("Radius: ").strip())
+                    if r <= 0:
+                        print("Error: Radius must be positive\n")
+                        continue
+                    print(f"\n\u2713 Circle (r={r}):")
+                    print(f"   Area      = {PI * r**2:.6f}")
+                    print(f"   Perimeter = {2 * PI * r:.6f}\n")
+                except ValueError:
+                    print("Error: Please enter a valid number\n")
+
+            elif choice == '2':
+                try:
+                    w = float(input("Width: ").strip())
+                    h = float(input("Height: ").strip())
+                    if w <= 0 or h <= 0:
+                        print("Error: Dimensions must be positive\n")
+                        continue
+                    print(f"\n\u2713 Rectangle ({w}\u00d7{h}):")
+                    print(f"   Area      = {w * h}")
+                    print(f"   Perimeter = {2 * (w + h)}\n")
+                except ValueError:
+                    print("Error: Please enter valid numbers\n")
+
+            elif choice == '3':
+                try:
+                    a = float(input("Side a: ").strip())
+                    b = float(input("Side b: ").strip())
+                    c = float(input("Side c: ").strip())
+                    if a <= 0 or b <= 0 or c <= 0:
+                        print("Error: Sides must be positive\n")
+                        continue
+                    if a + b <= c or a + c <= b or b + c <= a:
+                        print("Error: Invalid triangle (triangle inequality violated)\n")
+                        continue
+                    perimeter = a + b + c
+                    s = perimeter / 2
+                    area = math.sqrt(s * (s - a) * (s - b) * (s - c))
+                    print(f"\n\u2713 Triangle (a={a}, b={b}, c={c}):")
+                    print(f"   Area      = {area:.6f}")
+                    print(f"   Perimeter = {perimeter}\n")
+                except ValueError:
+                    print("Error: Please enter valid numbers\n")
+
+            elif choice == '4':
+                try:
+                    r = float(input("Radius: ").strip())
+                    if r <= 0:
+                        print("Error: Radius must be positive\n")
+                        continue
+                    print(f"\n\u2713 Sphere (r={r}):")
+                    print(f"   Volume        = {(4/3) * PI * r**3:.6f}")
+                    print(f"   Surface Area  = {4 * PI * r**2:.6f}\n")
+                except ValueError:
+                    print("Error: Please enter a valid number\n")
+
+            elif choice == '5':
+                try:
+                    r = float(input("Radius: ").strip())
+                    h = float(input("Height: ").strip())
+                    if r <= 0 or h <= 0:
+                        print("Error: Dimensions must be positive\n")
+                        continue
+                    print(f"\n\u2713 Cylinder (r={r}, h={h}):")
+                    print(f"   Volume        = {PI * r**2 * h:.6f}")
+                    print(f"   Surface Area  = {2 * PI * r * (r + h):.6f}\n")
+                except ValueError:
+                    print("Error: Please enter valid numbers\n")
+
+            elif choice == '6':
+                try:
+                    l = float(input("Length: ").strip())
+                    w = float(input("Width: ").strip())
+                    h = float(input("Height: ").strip())
+                    if l <= 0 or w <= 0 or h <= 0:
+                        print("Error: Dimensions must be positive\n")
+                        continue
+                    print(f"\n\u2713 Rectangular Prism ({l}\u00d7{w}\u00d7{h}):")
+                    print(f"   Volume        = {l * w * h}")
+                    print(f"   Surface Area  = {2 * (l*w + l*h + w*h)}\n")
+                except ValueError:
+                    print("Error: Please enter valid numbers\n")
+
+            elif choice == '7':
+                try:
+                    r = float(input("Base radius: ").strip())
+                    h = float(input("Height: ").strip())
+                    if r <= 0 or h <= 0:
+                        print("Error: Dimensions must be positive\n")
+                        continue
+                    slant = math.sqrt(r**2 + h**2)
+                    print(f"\n\u2713 Cone (r={r}, h={h}):")
+                    print(f"   Volume        = {(1/3) * PI * r**2 * h:.6f}")
+                    print(f"   Surface Area  = {PI * r * (r + slant):.6f}")
+                    print(f"   Slant Height  = {slant:.6f}\n")
+                except ValueError:
+                    print("Error: Please enter valid numbers\n")
+
+            else:
+                print("Invalid choice. Please enter 1-7 or 'quit'.\n")
+
+    except KeyboardInterrupt:
+        print("\n\nExiting geometry calculator...\n")
+
+
 def display_menu():
     """Display the main menu."""
     print("\n" + "=" * 70)
@@ -1379,6 +1722,10 @@ def display_menu():
     print(" 21) Prime Factorization")
     print(" 22) Percentage Calculator")
     print(" 23) Polynomial Operations")
+    print(" 24) Number Sequences")
+    print(" 25) Definite Integral Calculator")
+    print(" 26) Complex Number Calculator")
+    print(" 27) Geometry Calculator")
     print()
     print("=" * 70 + "\n")
 
@@ -1387,7 +1734,7 @@ def main():
     while True:
         display_menu()
         
-        choice = input("Select option (1-23, or 'quit' to exit): ").strip()
+        choice = input("Select option (1-27, or 'quit' to exit): ").strip()
         
         if choice.lower() == 'quit':
             print("\nExiting Math Tools...\n")
@@ -1438,8 +1785,16 @@ def main():
             percentage_calculator()
         elif choice == '23':
             polynomial_operations()
+        elif choice == '24':
+            number_sequences()
+        elif choice == '25':
+            definite_integral_calculator()
+        elif choice == '26':
+            complex_number_calculator()
+        elif choice == '27':
+            geometry_calculator()
         else:
-            print("Invalid choice. Please enter 1-23 or 'quit'.\n")
+            print("Invalid choice. Please enter 1-27 or 'quit'.\n")
 
 if __name__ == "__main__":
     main()
