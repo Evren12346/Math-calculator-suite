@@ -1,0 +1,450 @@
+#!/usr/bin/env python3
+"""NetNosey - defensive network exposure scanner.
+
+Authorized use only. Scans hosts/CIDRs for exposed services and produces
+terminal, JSON, and optional HTML reports.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import socket
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from ipaddress import ip_address, ip_network
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Set, Tuple
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+DEFAULT_PORTS = [
+    21, 22, 23, 25, 53, 80, 110, 143, 389, 443, 445,
+    3306, 3389, 5432, 5900, 6379, 8080, 8443, 27017,
+]
+
+PORT_NAMES = {
+    21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http",
+    110: "pop3", 143: "imap", 389: "ldap", 443: "https", 445: "smb",
+    3306: "mysql", 3389: "rdp", 5432: "postgres", 5900: "vnc", 6379: "redis",
+    8080: "http-alt", 8443: "https-alt", 27017: "mongodb",
+}
+
+SEVERITY_WEIGHT = {"CRITICAL": 15, "HIGH": 10, "MEDIUM": 5, "LOW": 2}
+
+
+@dataclass
+class Finding:
+    severity: str
+    title: str
+    host: str
+    port: Optional[int]
+    evidence: str
+    recommendation: str
+    exploit_scenario: str = ""
+    source: str = "core"
+
+
+def build_exploit_scenario(title: str, service: str = "service") -> str:
+    key = title.lower()
+    if "telnet" in key:
+        return "If credentials are weak or reused, an attacker can brute-force Telnet and gain plaintext remote shell access."
+    if "ftp" in key:
+        return "Attackers can harvest plaintext credentials in transit and reuse them to browse, upload, or tamper with files."
+    if "smb" in key:
+        return "Adversaries can enumerate shares, attempt credential attacks, and move laterally through exposed file services."
+    if "rdp" in key:
+        return "Internet-facing RDP is a common brute-force and credential-stuffing target for full interactive host takeover."
+    if "mongodb" in key or "redis" in key or "mysql" in key or "postgres" in key:
+        return "An exposed database service can allow unauthorized data reading, modification, or destructive actions if controls are weak."
+    if "http without https" in key:
+        return "Traffic can be intercepted or altered in transit, enabling credential theft and session manipulation over unencrypted HTTP."
+    if "attack surface" in key:
+        return "More exposed ports increase attacker options for service fingerprinting and chaining weaknesses into broader compromise."
+    if "outdated ssh" in key:
+        return "Older SSH stacks are more likely to expose known weaknesses that support credential attacks or downgraded cryptography."
+    if "hsts" in key:
+        return "Without HSTS, users can be coerced onto insecure HTTP, enabling interception and tampering before HTTPS is enforced."
+    return f"If this exposed {service} is misconfigured or weakly protected, an attacker may use it as an entry point for unauthorized access."
+
+
+def parse_ports(raw: str) -> List[int]:
+    if raw.strip().lower() == "default":
+        return list(DEFAULT_PORTS)
+
+    ports: List[int] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start_s, end_s = token.split("-", 1)
+            start, end = int(start_s), int(end_s)
+            if start > end:
+                start, end = end, start
+            ports.extend(range(start, end + 1))
+        else:
+            ports.append(int(token))
+
+    return [p for p in sorted(set(ports)) if 1 <= p <= 65535]
+
+
+def render_html_report(target: str, findings: List[Finding], summary: Dict[str, int]) -> str:
+    rows = []
+    for f in findings:
+        port_text = "n/a" if f.port is None else str(f.port)
+        rows.append(
+            f"<tr><td>{f.severity}</td><td>{f.title}</td><td>{f.host}</td><td>{port_text}</td>"
+            f"<td>{f.evidence}</td><td>{f.exploit_scenario}</td><td>{f.recommendation}</td><td>{f.source}</td></tr>"
+        )
+
+    rows_html = "\n".join(rows) if rows else "<tr><td colspan='8'>No findings</td></tr>"
+    return f"""<!doctype html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>NetNosey Report</title>
+<style>
+body {{ font-family: Arial, sans-serif; margin: 24px; background: #f8fafc; color: #111827; }}
+h1 {{ margin-bottom: 6px; }}
+.meta {{ color: #374151; margin-bottom: 18px; }}
+.grid {{ display: grid; grid-template-columns: repeat(5, minmax(100px,1fr)); gap: 8px; margin-bottom: 16px; }}
+.card {{ background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; }}
+table {{ width: 100%; border-collapse: collapse; background: white; }}
+th, td {{ border: 1px solid #e5e7eb; padding: 8px; vertical-align: top; text-align: left; }}
+th {{ background: #f3f4f6; }}
+</style>
+</head>
+<body>
+<h1>NetNosey Defensive Scan Report</h1>
+<div class='meta'>Target: {target} | Generated: {datetime.now().isoformat(timespec='seconds')}</div>
+<div class='grid'>
+  <div class='card'><strong>Critical</strong><div>{summary.get('CRITICAL', 0)}</div></div>
+  <div class='card'><strong>High</strong><div>{summary.get('HIGH', 0)}</div></div>
+  <div class='card'><strong>Medium</strong><div>{summary.get('MEDIUM', 0)}</div></div>
+  <div class='card'><strong>Low</strong><div>{summary.get('LOW', 0)}</div></div>
+  <div class='card'><strong>Risk Score</strong><div>{summary.get('risk_score', 0)}</div></div>
+</div>
+<table>
+<thead><tr><th>Severity</th><th>Title</th><th>Host</th><th>Port</th><th>Evidence</th><th>How It May Be Exploited</th><th>Recommendation</th><th>Source</th></tr></thead>
+<tbody>
+{rows_html}
+</tbody>
+</table>
+</body>
+</html>"""
+
+
+class NetworkScanner:
+    def __init__(self, target: str, ports: Sequence[int], timeout: float, workers: int, max_hosts: int):
+        self.target = target
+        self.ports = sorted(set(ports))
+        self.timeout = timeout
+        self.workers = workers
+        self.max_hosts = max_hosts
+
+        self.open_ports: List[Tuple[str, int]] = []
+        self.host_to_ports: Dict[str, Set[int]] = {}
+        self.service_banners: Dict[Tuple[str, int], str] = {}
+        self.findings: List[Finding] = []
+        self.info: List[str] = []
+        self.warnings: List[str] = []
+
+    def resolve_targets(self) -> List[str]:
+        try:
+            net = ip_network(self.target, strict=False)
+            hosts = [str(h) for h in net.hosts()][: self.max_hosts]
+            if net.num_addresses > self.max_hosts:
+                self.warnings.append(f"Host scope capped to {self.max_hosts} for safety")
+            return hosts or [str(net.network_address)]
+        except ValueError:
+            pass
+
+        try:
+            ip_address(self.target)
+            return [self.target]
+        except ValueError:
+            pass
+
+        resolved = socket.gethostbyname(self.target)
+        self.info.append(f"Resolved hostname {self.target} -> {resolved}")
+        return [resolved]
+
+    def scan_port(self, host: str, port: int) -> Optional[Tuple[str, int]]:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        try:
+            if sock.connect_ex((host, port)) == 0:
+                return host, port
+            return None
+        except OSError:
+            return None
+        finally:
+            sock.close()
+
+    def port_scan(self, hosts: Sequence[str]) -> None:
+        with ThreadPoolExecutor(max_workers=self.workers) as ex:
+            futures = [ex.submit(self.scan_port, host, port) for host in hosts for port in self.ports]
+            for future in as_completed(futures):
+                found = future.result()
+                if not found:
+                    continue
+                host, port = found
+                self.open_ports.append((host, port))
+                self.host_to_ports.setdefault(host, set()).add(port)
+
+        self.open_ports.sort(key=lambda t: (t[0], t[1]))
+
+    def grab_banner(self, host: str, port: int) -> str:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.timeout)
+            sock.connect((host, port))
+            if port in {80, 8080, 443, 8443}:
+                req = f"HEAD / HTTP/1.1\\r\\nHost: {host}\\r\\nConnection: close\\r\\n\\r\\n"
+                sock.sendall(req.encode("ascii", errors="ignore"))
+            raw = sock.recv(2048)
+            return raw.decode("utf-8", errors="ignore").strip()
+        except OSError:
+            return ""
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    def collect_banners(self) -> None:
+        for host, port in self.open_ports:
+            if port in {21, 22, 25, 80, 443, 8080, 8443}:
+                banner = self.grab_banner(host, port)
+                if banner:
+                    self.service_banners[(host, port)] = banner
+
+    def add_finding(self, finding: Finding) -> None:
+        if not finding.exploit_scenario:
+            service = "service"
+            if finding.port is not None:
+                service = PORT_NAMES.get(finding.port, "service")
+            finding.exploit_scenario = build_exploit_scenario(finding.title, service=service)
+
+        k = (finding.severity, finding.title, finding.host, finding.port, finding.source)
+        existing = {(f.severity, f.title, f.host, f.port, f.source) for f in self.findings}
+        if k not in existing:
+            self.findings.append(finding)
+
+    def evaluate_core_findings(self) -> None:
+        risky = {
+            23: ("HIGH", "Telnet exposed", "Disable Telnet and use SSH with key auth."),
+            21: ("HIGH", "FTP exposed", "Use SFTP/FTPS and restrict access."),
+            445: ("HIGH", "SMB exposed", "Restrict SMB to private segments and patch often."),
+            3389: ("HIGH", "RDP exposed", "Restrict RDP behind VPN and enforce MFA/NLA."),
+            27017: ("CRITICAL", "MongoDB exposed", "Enforce auth and private network binding."),
+            6379: ("CRITICAL", "Redis exposed", "Disable public exposure; require auth/TLS."),
+            3306: ("CRITICAL", "MySQL exposed", "Restrict ingress and enforce least privilege."),
+            5432: ("CRITICAL", "PostgreSQL exposed", "Restrict ingress and strong auth rules."),
+        }
+
+        for host, port in self.open_ports:
+            service = PORT_NAMES.get(port, "unknown")
+            if port in risky:
+                sev, title, fix = risky[port]
+                self.add_finding(Finding(
+                    severity=sev,
+                    title=title,
+                    host=host,
+                    port=port,
+                    evidence=f"Open {service} on {host}:{port}",
+                    recommendation=fix,
+                ))
+
+        for host, ports in self.host_to_ports.items():
+            if 80 in ports and not ({443, 8443} & ports):
+                self.add_finding(Finding(
+                    severity="MEDIUM",
+                    title="HTTP without HTTPS",
+                    host=host,
+                    port=80,
+                    evidence="Port 80 detected but HTTPS port not detected.",
+                    recommendation="Serve HTTPS and redirect HTTP to HTTPS.",
+                ))
+            if len(ports) >= 8:
+                self.add_finding(Finding(
+                    severity="MEDIUM",
+                    title="Large exposed attack surface",
+                    host=host,
+                    port=None,
+                    evidence=f"{len(ports)} open ports were detected on host.",
+                    recommendation="Disable unused services and apply host firewall policy.",
+                ))
+
+        for (host, port), banner in self.service_banners.items():
+            b = banner.lower()
+            if port == 22 and any(x in b for x in ["openssh_3", "openssh_4", "openssh_5", "openssh_6"]):
+                self.add_finding(Finding(
+                    severity="HIGH",
+                    title="Potentially outdated SSH",
+                    host=host,
+                    port=port,
+                    evidence=f"SSH banner indicates old version: {banner[:120]}",
+                    recommendation="Upgrade OpenSSH and disable weak ciphers.",
+                ))
+            if port in {80, 8080, 443, 8443} and "strict-transport-security" not in b:
+                self.add_finding(Finding(
+                    severity="LOW",
+                    title="Missing HSTS header",
+                    host=host,
+                    port=port,
+                    evidence="HSTS header not detected in sampled response.",
+                    recommendation="Add Strict-Transport-Security after HTTPS hardening.",
+                ))
+
+    def run_plugins(self, plugin_dir: Path) -> None:
+        if not plugin_dir.exists():
+            return
+        context = {
+            "open_ports": self.open_ports,
+            "host_to_ports": self.host_to_ports,
+            "service_banners": self.service_banners,
+        }
+        for plugin_path in sorted(plugin_dir.glob("*.py")):
+            try:
+                spec = importlib.util.spec_from_file_location(plugin_path.stem, plugin_path)
+                if spec is None or spec.loader is None:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                if hasattr(module, "run"):
+                    plugin_findings = module.run(context) or []
+                    for item in plugin_findings:
+                        self.add_finding(Finding(
+                            severity=item.get("severity", "LOW"),
+                            title=item.get("title", plugin_path.stem),
+                            host=item.get("host", "unknown"),
+                            port=item.get("port"),
+                            evidence=item.get("evidence", "Plugin-reported signal"),
+                            recommendation=item.get("recommendation", "Review plugin guidance"),
+                            exploit_scenario=item.get("exploit_scenario", ""),
+                            source=f"plugin:{plugin_path.stem}",
+                        ))
+            except Exception as exc:
+                self.warnings.append(f"Plugin {plugin_path.name} failed: {exc}")
+
+    def severity_counts(self) -> Dict[str, int]:
+        counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        for finding in self.findings:
+            counts[finding.severity] = counts.get(finding.severity, 0) + 1
+        return counts
+
+    def risk_score(self) -> int:
+        return sum(SEVERITY_WEIGHT.get(f.severity, 0) for f in self.findings)
+
+    def as_json(self) -> Dict[str, object]:
+        summary = self.severity_counts()
+        summary["risk_score"] = self.risk_score()
+        return {
+            "target": self.target,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "open_ports": [{"host": h, "port": p, "service": PORT_NAMES.get(p, "unknown")} for h, p in self.open_ports],
+            "findings": [asdict(f) for f in self.findings],
+            "summary": summary,
+            "info": self.info,
+            "warnings": self.warnings,
+        }
+
+    def print_report(self) -> None:
+        counts = self.severity_counts()
+        print("\n" + "=" * 72)
+        print("NETNOSEY REPORT")
+        print("=" * 72)
+        if not self.findings:
+            print("No major exposure signals found in the tested scope.")
+        else:
+            rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+            ordered = sorted(self.findings, key=lambda f: rank.get(f.severity, 0), reverse=True)
+            for i, f in enumerate(ordered, 1):
+                port = "n/a" if f.port is None else str(f.port)
+                print(f"\n[{i}] {f.severity} - {f.title}")
+                print(f"Host/Port: {f.host}:{port}")
+                print(f"Evidence: {f.evidence}")
+                print(f"How it may be exploited: {f.exploit_scenario}")
+                print(f"Fix: {f.recommendation}")
+                if f.source != "core":
+                    print(f"Source: {f.source}")
+
+        print("\nSummary")
+        print(f"Open ports: {len(self.open_ports)}")
+        print(f"Findings: {len(self.findings)}")
+        print(f"Critical: {counts['CRITICAL']}  High: {counts['HIGH']}  Medium: {counts['MEDIUM']}  Low: {counts['LOW']}")
+        print(f"Risk score: {self.risk_score()}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="NetNosey defensive network scanner")
+    parser.add_argument("target", help="IP, hostname, or CIDR target")
+    parser.add_argument("--ports", default="default", help="Port list, e.g. '22,80,443' or '1-1024'")
+    parser.add_argument("--timeout", type=float, default=1.0)
+    parser.add_argument("--workers", type=int, default=200)
+    parser.add_argument("--max-hosts", type=int, default=64)
+    parser.add_argument("--plugin-dir", default=str(SCRIPT_DIR / "nosey_plugins" / "net"))
+    parser.add_argument("--json-out")
+    parser.add_argument("--html-out")
+    parser.add_argument("--authorized", action="store_true", help="Required: confirm authorized testing")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if not args.authorized:
+        print("Refusing to run without --authorized acknowledgement.")
+        return 2
+
+    ports = parse_ports(args.ports)
+    if not ports:
+        print("No valid ports supplied.")
+        return 2
+
+    scanner = NetworkScanner(
+        target=args.target,
+        ports=ports,
+        timeout=max(0.1, args.timeout),
+        workers=max(4, args.workers),
+        max_hosts=max(1, args.max_hosts),
+    )
+
+    print("\nNetNosey: scanning authorized target...")
+    print(f"Target: {args.target}")
+    print(f"Ports: {len(ports)}")
+
+    try:
+        hosts = scanner.resolve_targets()
+        scanner.port_scan(hosts)
+        scanner.collect_banners()
+        scanner.evaluate_core_findings()
+        scanner.run_plugins(Path(args.plugin_dir))
+        scanner.print_report()
+    except KeyboardInterrupt:
+        print("\nScan cancelled by user.")
+        return 130
+    except Exception as exc:
+        print(f"Scan failed: {exc}")
+        return 1
+
+    payload = scanner.as_json()
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(f"JSON report written to {args.json_out}")
+    if args.html_out:
+        summary = scanner.severity_counts()
+        summary["risk_score"] = scanner.risk_score()
+        html = render_html_report(scanner.target, scanner.findings, summary)
+        Path(args.html_out).write_text(html, encoding="utf-8")
+        print(f"HTML report written to {args.html_out}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,409 @@
+#!/usr/bin/env python3
+"""WebNosey - defensive web exposure scanner.
+
+Authorized use only. Runs passive and low-impact checks and can output
+terminal, JSON, and HTML reports.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import re
+import socket
+import ssl
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
+from urllib.parse import urljoin, urlparse
+
+import requests
+import urllib3
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+SEVERITY_WEIGHT = {"CRITICAL": 15, "HIGH": 10, "MEDIUM": 5, "LOW": 2}
+
+
+@dataclass
+class Finding:
+    severity: str
+    title: str
+    url: str
+    evidence: str
+    recommendation: str
+    exploit_scenario: str = ""
+    source: str = "core"
+
+
+def build_exploit_scenario(title: str) -> str:
+    key = title.lower()
+    if "not using https" in key:
+        return "Attackers on-path can intercept and alter traffic, exposing credentials and session data sent over HTTP."
+    if "weak tls" in key:
+        return "Older TLS versions can be targeted with downgrade or cryptographic weaknesses to weaken transport protections."
+    if "missing header" in key:
+        return "Missing browser security headers make it easier for attackers to chain web attacks like script injection, clickjacking, or unsafe content handling."
+    if "technology disclosure" in key:
+        return "Exposed framework details help attackers tailor exploit attempts to known versions and stacks."
+    if "dangerous http methods" in key:
+        return "If backend routing permits it, risky methods can enable unauthorized content changes or debugging-style request abuse."
+    if "cookie missing flags" in key:
+        return "Weak cookie flags can allow token theft via script access or interception, increasing session hijack risk."
+    if "sensitive path reachable" in key:
+        return "Reachable sensitive paths can leak configuration, source artifacts, or admin surfaces that support deeper compromise."
+    if "stack trace exposure" in key or "sql error leakage" in key or "path disclosure" in key:
+        return "Verbose errors reveal internals attackers use to map components and craft more precise follow-on attacks."
+    return "This finding may provide reconnaissance value or a direct path to unauthorized access depending on surrounding controls."
+
+
+def normalize_url(raw_url: str) -> str:
+    if not raw_url.startswith(("http://", "https://")):
+        return "https://" + raw_url
+    return raw_url
+
+
+def render_html_report(target: str, findings: List[Finding], summary: Dict[str, int]) -> str:
+    rows = []
+    for f in findings:
+        rows.append(
+            f"<tr><td>{f.severity}</td><td>{f.title}</td><td>{f.url}</td><td>{f.evidence}</td><td>{f.exploit_scenario}</td><td>{f.recommendation}</td><td>{f.source}</td></tr>"
+        )
+    rows_html = "\n".join(rows) if rows else "<tr><td colspan='7'>No findings</td></tr>"
+
+    return f"""<!doctype html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>WebNosey Report</title>
+<style>
+body {{ font-family: Arial, sans-serif; margin: 24px; background: #f8fafc; color: #111827; }}
+.grid {{ display: grid; grid-template-columns: repeat(5, minmax(90px,1fr)); gap: 8px; margin-bottom: 16px; }}
+.card {{ background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; }}
+table {{ width: 100%; border-collapse: collapse; background: white; }}
+th, td {{ border: 1px solid #e5e7eb; padding: 8px; vertical-align: top; text-align: left; }}
+th {{ background: #f3f4f6; }}
+</style>
+</head>
+<body>
+<h1>WebNosey Defensive Scan Report</h1>
+<p>Target: {target} | Generated: {datetime.now().isoformat(timespec='seconds')}</p>
+<div class='grid'>
+  <div class='card'><strong>Critical</strong><div>{summary.get('CRITICAL', 0)}</div></div>
+  <div class='card'><strong>High</strong><div>{summary.get('HIGH', 0)}</div></div>
+  <div class='card'><strong>Medium</strong><div>{summary.get('MEDIUM', 0)}</div></div>
+  <div class='card'><strong>Low</strong><div>{summary.get('LOW', 0)}</div></div>
+  <div class='card'><strong>Risk Score</strong><div>{summary.get('risk_score', 0)}</div></div>
+</div>
+<table>
+<thead><tr><th>Severity</th><th>Title</th><th>URL</th><th>Evidence</th><th>How It May Be Exploited</th><th>Recommendation</th><th>Source</th></tr></thead>
+<tbody>
+{rows_html}
+</tbody>
+</table>
+</body>
+</html>"""
+
+
+class WebScanner:
+    def __init__(self, url: str, timeout: float):
+        self.url = normalize_url(url)
+        self.timeout = timeout
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "WebNosey/2.0 (Defensive Scanner)"
+        })
+        self.findings: List[Finding] = []
+        self.info: List[str] = []
+        self.warnings: List[str] = []
+
+    def add_finding(self, finding: Finding) -> None:
+        if not finding.exploit_scenario:
+            finding.exploit_scenario = build_exploit_scenario(finding.title)
+        key = (finding.severity, finding.title, finding.url, finding.source)
+        existing = {(f.severity, f.title, f.url, f.source) for f in self.findings}
+        if key not in existing:
+            self.findings.append(finding)
+
+    def fetch(self, url: Optional[str] = None, method: str = "GET", **kwargs) -> Optional[requests.Response]:
+        target = url or self.url
+        try:
+            return self.session.request(method, target, timeout=self.timeout, verify=False, allow_redirects=True, **kwargs)
+        except requests.RequestException as exc:
+            self.warnings.append(f"Request failed for {target}: {exc}")
+            return None
+
+    def check_tls(self) -> None:
+        parsed = urlparse(self.url)
+        if parsed.scheme != "https":
+            self.add_finding(Finding(
+                severity="HIGH",
+                title="Site is not using HTTPS",
+                url=self.url,
+                evidence="URL scheme is HTTP.",
+                recommendation="Use HTTPS and enforce redirect from HTTP.",
+            ))
+            return
+
+        host = parsed.hostname
+        if not host:
+            return
+        try:
+            ctx = ssl.create_default_context()
+            with socket.create_connection((host, 443), timeout=self.timeout) as sock:
+                with ctx.wrap_socket(sock, server_hostname=host) as wrapped:
+                    version = wrapped.version() or "unknown"
+                    self.info.append(f"TLS version: {version}")
+                    if version in {"SSLv3", "TLSv1", "TLSv1.1"}:
+                        self.add_finding(Finding(
+                            severity="HIGH",
+                            title="Weak TLS version in use",
+                            url=self.url,
+                            evidence=f"Negotiated protocol version: {version}",
+                            recommendation="Disable TLS 1.0/1.1 and use TLS 1.2+ only.",
+                        ))
+        except Exception as exc:
+            self.warnings.append(f"TLS check failed: {exc}")
+
+    def check_security_headers(self) -> None:
+        resp = self.fetch()
+        if not resp:
+            return
+
+        required = {
+            "Strict-Transport-Security": "HIGH",
+            "Content-Security-Policy": "HIGH",
+            "X-Content-Type-Options": "MEDIUM",
+            "X-Frame-Options": "MEDIUM",
+            "Referrer-Policy": "LOW",
+        }
+
+        for header, sev in required.items():
+            if header not in resp.headers:
+                self.add_finding(Finding(
+                    severity=sev,
+                    title=f"Missing header: {header}",
+                    url=self.url,
+                    evidence=f"{header} was not present in response headers.",
+                    recommendation=f"Add {header} to strengthen browser-side protections.",
+                ))
+
+        if "Server" in resp.headers:
+            self.info.append(f"Server header: {resp.headers['Server'][:120]}")
+        if "X-Powered-By" in resp.headers:
+            self.add_finding(Finding(
+                severity="LOW",
+                title="Technology disclosure header",
+                url=self.url,
+                evidence=f"X-Powered-By: {resp.headers['X-Powered-By'][:120]}",
+                recommendation="Remove or sanitize framework disclosure headers.",
+            ))
+
+    def check_http_methods(self) -> None:
+        resp = self.fetch(method="OPTIONS")
+        if not resp:
+            return
+        allow = [x.strip().upper() for x in resp.headers.get("Allow", "").split(",") if x.strip()]
+        dangerous = [m for m in allow if m in {"TRACE", "CONNECT", "PUT", "DELETE"}]
+        if dangerous:
+            self.add_finding(Finding(
+                severity="MEDIUM",
+                title="Potentially dangerous HTTP methods allowed",
+                url=self.url,
+                evidence=f"Allow header includes: {', '.join(dangerous)}",
+                recommendation="Disable unnecessary methods at the edge and app server.",
+            ))
+
+    def check_cookie_flags(self) -> None:
+        resp = self.fetch()
+        if not resp:
+            return
+
+        for cookie in resp.cookies:
+            missing = []
+            if not cookie.secure:
+                missing.append("Secure")
+            if not cookie.has_nonstandard_attr("HttpOnly"):
+                missing.append("HttpOnly")
+            if missing:
+                self.add_finding(Finding(
+                    severity="MEDIUM",
+                    title=f"Cookie missing flags: {cookie.name}",
+                    url=self.url,
+                    evidence=f"Missing {', '.join(missing)} on cookie {cookie.name}",
+                    recommendation="Set Secure, HttpOnly, and appropriate SameSite for session cookies.",
+                ))
+
+    def check_sensitive_paths(self) -> None:
+        candidates = ["/.env", "/.git", "/config.php", "/admin", "/backup", "/debug", "/robots.txt"]
+        for path in candidates:
+            test_url = urljoin(self.url.rstrip("/") + "/", path.lstrip("/"))
+            resp = self.fetch(url=test_url, method="HEAD")
+            if resp and resp.status_code in {200, 301, 302, 403}:
+                sev = "HIGH" if resp.status_code == 200 and path in {"/.env", "/.git", "/config.php"} else "MEDIUM"
+                self.add_finding(Finding(
+                    severity=sev,
+                    title="Sensitive path reachable",
+                    url=test_url,
+                    evidence=f"Status code {resp.status_code} for path {path}",
+                    recommendation="Restrict access to sensitive files/directories and verify deploy hygiene.",
+                ))
+
+    def check_error_disclosure(self) -> None:
+        resp = self.fetch()
+        if not resp:
+            return
+
+        text = resp.text
+        patterns = {
+            "Stack trace exposure": r"traceback|stack trace|exception in thread",
+            "SQL error leakage": r"sql syntax|mysql|odbc|sqlite|postgres",
+            "Path disclosure": r"/var/www|/home/\w+|c:\\\\users\\\\",
+        }
+        for title, pat in patterns.items():
+            if re.search(pat, text, re.IGNORECASE):
+                self.add_finding(Finding(
+                    severity="MEDIUM",
+                    title=title,
+                    url=self.url,
+                    evidence=f"Response body matches pattern: {pat}",
+                    recommendation="Use generic error pages and avoid exposing internals in responses.",
+                ))
+
+    def run_plugins(self, plugin_dir: Path) -> None:
+        if not plugin_dir.exists():
+            return
+        context = {
+            "target_url": self.url,
+            "fetch": self.fetch,
+            "latest_info": self.info,
+        }
+        for plugin_path in sorted(plugin_dir.glob("*.py")):
+            try:
+                spec = importlib.util.spec_from_file_location(plugin_path.stem, plugin_path)
+                if spec is None or spec.loader is None:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                if hasattr(module, "run"):
+                    plugin_findings = module.run(context) or []
+                    for item in plugin_findings:
+                        self.add_finding(Finding(
+                            severity=item.get("severity", "LOW"),
+                            title=item.get("title", plugin_path.stem),
+                            url=item.get("url", self.url),
+                            evidence=item.get("evidence", "Plugin-reported signal"),
+                            recommendation=item.get("recommendation", "Review plugin guidance"),
+                            exploit_scenario=item.get("exploit_scenario", ""),
+                            source=f"plugin:{plugin_path.stem}",
+                        ))
+            except Exception as exc:
+                self.warnings.append(f"Plugin {plugin_path.name} failed: {exc}")
+
+    def scan(self, plugin_dir: Path) -> None:
+        self.check_tls()
+        self.check_security_headers()
+        self.check_http_methods()
+        self.check_cookie_flags()
+        self.check_sensitive_paths()
+        self.check_error_disclosure()
+        self.run_plugins(plugin_dir)
+
+    def severity_counts(self) -> Dict[str, int]:
+        counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        for finding in self.findings:
+            counts[finding.severity] = counts.get(finding.severity, 0) + 1
+        return counts
+
+    def risk_score(self) -> int:
+        return sum(SEVERITY_WEIGHT.get(f.severity, 0) for f in self.findings)
+
+    def as_json(self) -> Dict[str, object]:
+        summary = self.severity_counts()
+        summary["risk_score"] = self.risk_score()
+        return {
+            "target": self.url,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "findings": [asdict(f) for f in self.findings],
+            "summary": summary,
+            "info": self.info,
+            "warnings": self.warnings,
+        }
+
+    def print_report(self) -> None:
+        counts = self.severity_counts()
+        print("\n" + "=" * 72)
+        print("WEBNOSEY REPORT")
+        print("=" * 72)
+        if not self.findings:
+            print("No major web exposure signals detected.")
+        else:
+            rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+            ordered = sorted(self.findings, key=lambda f: rank.get(f.severity, 0), reverse=True)
+            for i, f in enumerate(ordered, 1):
+                print(f"\n[{i}] {f.severity} - {f.title}")
+                print(f"URL: {f.url}")
+                print(f"Evidence: {f.evidence}")
+                print(f"How it may be exploited: {f.exploit_scenario}")
+                print(f"Fix: {f.recommendation}")
+                if f.source != "core":
+                    print(f"Source: {f.source}")
+
+        print("\nSummary")
+        print(f"Findings: {len(self.findings)}")
+        print(f"Critical: {counts['CRITICAL']}  High: {counts['HIGH']}  Medium: {counts['MEDIUM']}  Low: {counts['LOW']}")
+        print(f"Risk score: {self.risk_score()}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="WebNosey defensive web scanner")
+    parser.add_argument("url", help="Target URL or hostname")
+    parser.add_argument("--timeout", type=float, default=6.0)
+    parser.add_argument("--plugin-dir", default=str(SCRIPT_DIR / "nosey_plugins" / "web"))
+    parser.add_argument("--json-out")
+    parser.add_argument("--html-out")
+    parser.add_argument("--authorized", action="store_true", help="Required: confirm authorized testing")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if not args.authorized:
+        print("Refusing to run without --authorized acknowledgement.")
+        return 2
+
+    scanner = WebScanner(args.url, timeout=max(1.0, args.timeout))
+    print("\nWebNosey: scanning authorized target...")
+    print(f"Target: {scanner.url}")
+
+    try:
+        scanner.scan(Path(args.plugin_dir))
+        scanner.print_report()
+    except KeyboardInterrupt:
+        print("\nScan cancelled by user.")
+        return 130
+    except Exception as exc:
+        print(f"Scan failed: {exc}")
+        return 1
+
+    payload = scanner.as_json()
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(f"JSON report written to {args.json_out}")
+    if args.html_out:
+        summary = scanner.severity_counts()
+        summary["risk_score"] = scanner.risk_score()
+        html = render_html_report(scanner.url, scanner.findings, summary)
+        Path(args.html_out).write_text(html, encoding="utf-8")
+        print(f"HTML report written to {args.html_out}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
